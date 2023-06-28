@@ -1,0 +1,92 @@
+// Printing when given syscall is called
+global new_proc, execve
+
+probe syscall.fork
+{
+    if (execname() == @1)
+        printf("Process \"%s\" (%d) called fork syscall\n", execname(), pid())
+}
+
+probe syscall.vfork
+{
+    if (execname() == @1)
+        printf("Process \"%s\" (%d) called vfork syscall\n", execname(), pid())
+}
+
+probe syscall.clone
+{
+    if (execname() == @1)
+        printf("Process \"%s\" (%d) called clone syscall\n", execname(), pid())
+}
+
+probe syscall.execve, syscall.execveat
+{
+    if (isinstr(args, @1))
+        printf("Process \"%s\" (%d) executed execve syscall for: %s\n", execname(), pid(), @1)
+}
+
+// Runtime statistics
+global run_start
+global started_count
+global run_times
+global last_pid
+
+probe scheduler.cpu_on
+{
+    if (execname() == @1) {
+        run_start[cpu(), pid()] = gettimeofday_us()
+        started_count[cpu()] = 1
+        last_pid[cpu()] = pid()
+    }
+}
+
+probe scheduler.cpu_off
+{
+    if (started_count[cpu()] == 1){
+        run_times[cpu(),last_pid[cpu()]] += gettimeofday_us() - run_start[cpu(),last_pid[cpu()]]
+        started_count[cpu()] = 0
+    }
+}
+
+// Hardware interrupt statistics
+global hr_start
+global hr_counter
+
+probe kernel.function("hrtimer_interrupt@kernel/time/hrtimer.c")
+{
+    if (execname() == @1)
+        hr_start[cpu(),pid()] = gettimeofday_us()
+}
+
+probe kernel.function("hrtimer_interrupt@kernel/time/hrtimer.c").return
+{
+    if (execname() == @1) {
+        hr_counter[cpu(),pid()] += gettimeofday_us() - hr_start[cpu(),pid()]
+    }
+}
+
+// Printing statistics every 5 seconds and at the end
+probe timer.s(5), end
+{
+    printf("Scheduling stats: \n")
+    printf("%-4s %-7s %-8s %-14s %-15s\n", "CPU", "PID", "run (%)", "hrtimer(ms|%)", "comm")
+    foreach([cpu+,pid] in run_times) {
+        percent = 1
+        hr = hr_counter[cpu,pid]
+        run = run_times[cpu,pid] - hr
+
+        if (run > 50000)
+            percent = (run / 50000)
+
+        if (hr > 50000)
+            hr = (hr / 50000)
+
+        if (percent == 1)
+            printf("%-4d %-7d <%-7d %-14d %-15s\n", cpu, pid, percent, hr, @1)
+        else
+            printf("%-4d %-7d %-8d %-14d %-15s\n", cpu, pid, percent, hr, @1)
+    }
+    printf("\n");
+    delete run_times
+    delete hr_counter
+}
